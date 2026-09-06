@@ -116,7 +116,8 @@ def detect_reference_face_in_frame(frame, gray, reference_embedding):
 
 
 def update_intervals(face_detected, frame_index, fps, current_interval_start,
-                      frames_without_detection, frame_skip_tolerance, time_intervals):
+                      frames_without_detection, frame_skip_tolerance, time_intervals,
+                      last_detected_frame):
     """
     Track continuous intervals where a face is detected in video frames.
 
@@ -128,25 +129,32 @@ def update_intervals(face_detected, frame_index, fps, current_interval_start,
         frames_without_detection (int): Count of consecutive frames with no detection.
         frame_skip_tolerance (int): Max allowed skipped frames before closing interval.
         time_intervals (list): List of tuples recording (start_time, end_time) of intervals.
+        last_detected_frame (int or None): Frame index where the face was last actually
+            seen during the current interval. Used (rather than the current frame_index)
+            to close an interval, so its reported end time reflects when the face was
+            last really there, not how many tolerance frames were spent waiting to see
+            if it would come back.
 
     Returns:
-        tuple: Updated current_interval_start and frames_without_detection.
+        tuple: Updated current_interval_start, frames_without_detection, last_detected_frame.
     """
     if face_detected:
         if current_interval_start is None:
             current_interval_start = frame_index
         frames_without_detection = 0
+        last_detected_frame = frame_index
     else:
         if current_interval_start is not None:
             frames_without_detection += 1
             if frames_without_detection > frame_skip_tolerance:
                 start_time = current_interval_start / fps
-                end_time = frame_index / fps
+                end_time = last_detected_frame / fps
                 time_intervals.append((start_time, end_time))
                 current_interval_start = None
                 frames_without_detection = 0
+                last_detected_frame = None
 
-    return current_interval_start, frames_without_detection
+    return current_interval_start, frames_without_detection, last_detected_frame
 
 
 def detect_face_in_video(video_path, reference_embedding, frame_skip_tolerance=3,
@@ -171,6 +179,7 @@ def detect_face_in_video(video_path, reference_embedding, frame_skip_tolerance=3
     time_intervals = []
     current_interval_start = None
     frames_without_detection = 0
+    last_detected_frame = None
 
     for frame_index in range(frame_count):
         ret, frame = video.read()
@@ -182,16 +191,17 @@ def detect_face_in_video(video_path, reference_embedding, frame_skip_tolerance=3
             face_detected = detect_reference_face_in_frame(frame, gray, reference_embedding)
             binary_detection_array[frame_index] = 1 if face_detected else 0
 
-            current_interval_start, frames_without_detection = update_intervals(
+            current_interval_start, frames_without_detection, last_detected_frame = update_intervals(
                 face_detected, frame_index, fps, current_interval_start,
-                frames_without_detection, frame_skip_tolerance, time_intervals)
+                frames_without_detection, frame_skip_tolerance, time_intervals,
+                last_detected_frame)
 
         if progress_callback:
             progress_callback(frame_index + 1, frame_count)
 
     if current_interval_start is not None:
         start_time = current_interval_start / fps
-        end_time = frame_index / fps
+        end_time = last_detected_frame / fps
         time_intervals.append((start_time, end_time))
 
     video.release()
