@@ -29,12 +29,15 @@ Major functions:
         would need root.after() to be fully safe).
 
     - _run_detection_and_report(reference_image_path, video_path, frame_skip,
-      frame_skip_tolerance):
+      frame_skip_tolerance, cancel_event):
         The background-thread target. Wraps
         video_processing.run_face_detection in a try/except, formats the
         resulting time intervals into a message box, and shows an error
-        dialog on failure. On success, also stores the results (and the
-        video's fps) and re-enables the two export buttons via root.after,
+        dialog on failure. Passes cancel_event through so the scan can be
+        stopped early; if it was cancelled, the message box reports a
+        partial result instead of a completed one. On success (complete
+        or cancelled), also stores the results (and the video's fps) and
+        re-enables the export buttons and disables Cancel via root.after,
         since widget updates must happen on the main thread. This function
         is where the "pure core, UI shell" boundary from the refactor is
         enforced: run_face_detection never touches messagebox itself, only
@@ -44,9 +47,18 @@ Major functions:
         Validates that both a reference image and a video have been
         selected, reads the frame_skip and frame_skip_tolerance values
         from their Spinbox widgets, resets the progress bar and disables
-        the export buttons (since they'd refer to a stale prior run), and
-        starts _run_detection_and_report on a background thread so the
-        GUI doesn't freeze during a long scan.
+        the export buttons (since they'd refer to a stale prior run),
+        creates a fresh threading.Event for this run and enables the
+        Cancel button, and starts _run_detection_and_report on a
+        background thread so the GUI doesn't freeze during a long scan.
+
+    - cancel_detection():
+        Sets the current run's cancel_event and disables the Cancel
+        button immediately, so a double-click can't queue a second
+        cancellation. The scan itself notices the event on its next
+        per-frame check (see video_processing.detect_face_in_video) and
+        winds down from there - this handler doesn't stop anything by
+        itself, it only signals the intent to stop.
 
     - export_csv() / export_edl() / export_otio():
         Prompt for a save location via asksaveasfilename, then call
@@ -101,31 +113,43 @@ def start_tkinter_GUI():
     # buttons can act on them. A plain dict (rather than separate variables)
     # since it's mutated from the worker thread and read from the main thread.
     last_results = {"time_intervals": None, "fps": None, "video_path": None}
+    # Holds the threading.Event for whichever scan is currently running (or
+    # None if none is running), so cancel_detection() can reach it.
+    current_run = {"cancel_event": None}
 
     def _run_detection_and_report(reference_image_path, video_path,
-                                   frame_skip, frame_skip_tolerance):
+                                   frame_skip, frame_skip_tolerance, cancel_event):
         try:
-            time_intervals, _, fps = run_face_detection(
+            time_intervals, _, fps, cancelled = run_face_detection(
                 reference_image_path, video_path, update_progress,
-                frame_skip=frame_skip, frame_skip_tolerance=frame_skip_tolerance)
+                frame_skip=frame_skip, frame_skip_tolerance=frame_skip_tolerance,
+                cancel_event=cancel_event)
 
             last_results["time_intervals"] = time_intervals
             last_results["fps"] = fps
             last_results["video_path"] = video_path
+            current_run["cancel_event"] = None
             # Widget state must be touched on the main thread; root.after
-            # schedules this safely instead of enabling the buttons directly
+            # schedules this safely instead of touching widgets directly
             # from this background thread.
             root.after(0, lambda: (
                 export_csv_button.config(state=tk.NORMAL),
                 export_edl_button.config(state=tk.NORMAL),
                 export_otio_button.config(state=tk.NORMAL),
+                cancel_button.config(state=tk.DISABLED),
             ))
 
-            output = "Time Intervals (in seconds):"
+            if cancelled:
+                output = "Scan cancelled. Partial results (in seconds):"
+            else:
+                output = "Time Intervals (in seconds):"
             for start, end in time_intervals:
                 output += f"\nStart: {start:.2f}s, End: {end:.2f}s"
-            messagebox.showinfo("Detection Results", output)
+            messagebox.showinfo(
+                "Detection Cancelled" if cancelled else "Detection Results", output)
         except Exception as e:
+            current_run["cancel_event"] = None
+            root.after(0, lambda: cancel_button.config(state=tk.DISABLED))
             messagebox.showerror("Error", str(e))
 
     def start_detection():
@@ -155,10 +179,24 @@ def start_tkinter_GUI():
         export_edl_button.config(state=tk.DISABLED)
         export_otio_button.config(state=tk.DISABLED)
 
+        cancel_event = threading.Event()
+        current_run["cancel_event"] = cancel_event
+        cancel_button.config(state=tk.NORMAL)
+
         thread = threading.Thread(
             target=_run_detection_and_report,
-            args=(reference_image_path, video_path, frame_skip, frame_skip_tolerance))
+            args=(reference_image_path, video_path, frame_skip, frame_skip_tolerance,
+                  cancel_event))
         thread.start()
+
+    def cancel_detection():
+        cancel_event = current_run["cancel_event"]
+        if cancel_event is not None:
+            cancel_event.set()
+        # Disable immediately so a second click can't queue another
+        # cancellation; the running scan notices the event on its own and
+        # _run_detection_and_report re-disables this once it actually stops.
+        cancel_button.config(state=tk.DISABLED)
 
     def export_csv():
         if last_results["time_intervals"] is None:
@@ -239,8 +277,15 @@ def start_tkinter_GUI():
     tk.Label(params_frame, text="Skip Tolerance (leniency):").grid(row=1, column=0, padx=5, pady=5, sticky="e")
     tk.Spinbox(params_frame, from_=0, to=30, textvariable=frame_skip_tolerance_var, width=5).grid(row=1, column=1, padx=5, pady=5)
 
-    # Run Detection
-    tk.Button(root, text="Start Detection", command=start_detection).pack(pady=20)
+    # Run / Cancel Detection
+    run_frame = tk.Frame(root)
+    run_frame.pack(pady=20)
+
+    tk.Button(run_frame, text="Start Detection", command=start_detection).grid(row=0, column=0, padx=5)
+
+    cancel_button = tk.Button(
+        run_frame, text="Cancel", command=cancel_detection, state=tk.DISABLED)
+    cancel_button.grid(row=0, column=1, padx=5)
 
     # Progress bar
     progress_bar = ttk.Progressbar(root, length=300, mode='determinate')
