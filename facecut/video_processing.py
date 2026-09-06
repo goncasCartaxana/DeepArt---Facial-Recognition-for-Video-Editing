@@ -173,6 +173,8 @@ def detect_face_in_video(video_path, reference_embedding, frame_skip_tolerance=3
     Returns:
         binary_detection_array (ndarray): Binary array marking frames with face detected.
         time_intervals (list): List of (start_time, end_time) tuples for detected face intervals.
+        fps (float): Frames per second of the source video. Returned alongside the
+            results because EDL export needs it to compute frame-accurate timecodes.
     """
     video, fps, frame_count = open_video(video_path)
     binary_detection_array = np.zeros(frame_count, dtype=int)
@@ -205,7 +207,7 @@ def detect_face_in_video(video_path, reference_embedding, frame_skip_tolerance=3
         time_intervals.append((start_time, end_time))
 
     video.release()
-    return binary_detection_array, time_intervals
+    return binary_detection_array, time_intervals, fps
 
 
 def run_face_detection(reference_image_path, video_path, progress_callback=None,
@@ -229,11 +231,12 @@ def run_face_detection(reference_image_path, video_path, progress_callback=None,
     Returns:
         time_intervals (list): List of (start_time, end_time) tuples.
         binary_detection_array (ndarray): Binary array marking frames with face detected.
+        fps (float): Frames per second of the source video (needed for EDL export).
     """
     reference_embedding = load_reference_image(reference_image_path)
-    binary_detection_array, time_intervals = detect_face_in_video(
+    binary_detection_array, time_intervals, fps = detect_face_in_video(
         video_path, reference_embedding,
         frame_skip=frame_skip,
         frame_skip_tolerance=frame_skip_tolerance,
         progress_callback=progress_callback)
-    return time_intervals, binary_detection_array
+    return time_intervals, binary_detection_array, fps

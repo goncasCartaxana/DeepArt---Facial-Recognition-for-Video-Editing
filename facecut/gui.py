@@ -1,4 +1,3 @@
-
 """
 gui.py
 -------
@@ -34,16 +33,28 @@ Major functions:
         The background-thread target. Wraps
         video_processing.run_face_detection in a try/except, formats the
         resulting time intervals into a message box, and shows an error
-        dialog on failure. This function is where the "pure core, UI
-        shell" boundary from the refactor is enforced: run_face_detection
-        never touches messagebox itself, only this function does.
+        dialog on failure. On success, also stores the results (and the
+        video's fps) and re-enables the two export buttons via root.after,
+        since widget updates must happen on the main thread. This function
+        is where the "pure core, UI shell" boundary from the refactor is
+        enforced: run_face_detection never touches messagebox itself, only
+        this function does.
 
     - start_detection():
         Validates that both a reference image and a video have been
         selected, reads the frame_skip and frame_skip_tolerance values
-        from their Spinbox widgets, resets the progress bar, and starts
-        _run_detection_and_report on a background thread so the GUI
-        doesn't freeze during a long scan.
+        from their Spinbox widgets, resets the progress bar and disables
+        the export buttons (since they'd refer to a stale prior run), and
+        starts _run_detection_and_report on a background thread so the
+        GUI doesn't freeze during a long scan.
+
+    - export_csv() / export_edl() / export_otio():
+        Prompt for a save location via asksaveasfilename, then call
+        export.export_intervals_to_csv / export.export_intervals_to_edl /
+        export.export_intervals_to_otio on the most recently stored
+        detection results. Disabled (via button state) until a scan has
+        completed successfully, so they can't be triggered with no
+        results to export.
 
 Two Spinbox controls expose the scan's speed/thoroughness tradeoff directly
 to the user, rather than relying on video_processing.py's hardcoded
@@ -54,6 +65,14 @@ defaults:
       missed detections are allowed before an open interval is closed.
       Higher = more forgiving of brief misses (blinks, quick turns), but
       can merge separate appearances together if set too high.
+
+Export buttons let the user save the most recent scan's results as a CSV
+(plain seconds, universal), a CMX3600 EDL (frame-accurate, importable
+directly into Premiere/Resolve/Final Cut/Avid as a cut list), or an
+OpenTimelineIO (.otio) file (a single clip referencing the original video
+with a marker at each detected interval - natively importable in Kdenlive
+25.04+, and convertible to other formats via `otioconvert`) - see export.py
+for the actual formatting logic, which this module never duplicates.
 """
 
 import threading
@@ -61,6 +80,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .video_processing import run_face_detection
+from .export import export_intervals_to_csv, export_intervals_to_edl, export_intervals_to_otio
 
 
 def start_tkinter_GUI():
@@ -77,12 +97,29 @@ def start_tkinter_GUI():
             progress_bar['maximum'] = total
             progress_bar['value'] = current
 
+    # Holds the results of the most recent successful scan, so the export
+    # buttons can act on them. A plain dict (rather than separate variables)
+    # since it's mutated from the worker thread and read from the main thread.
+    last_results = {"time_intervals": None, "fps": None, "video_path": None}
+
     def _run_detection_and_report(reference_image_path, video_path,
                                    frame_skip, frame_skip_tolerance):
         try:
-            time_intervals, _ = run_face_detection(
+            time_intervals, _, fps = run_face_detection(
                 reference_image_path, video_path, update_progress,
                 frame_skip=frame_skip, frame_skip_tolerance=frame_skip_tolerance)
+
+            last_results["time_intervals"] = time_intervals
+            last_results["fps"] = fps
+            last_results["video_path"] = video_path
+            # Widget state must be touched on the main thread; root.after
+            # schedules this safely instead of enabling the buttons directly
+            # from this background thread.
+            root.after(0, lambda: (
+                export_csv_button.config(state=tk.NORMAL),
+                export_edl_button.config(state=tk.NORMAL),
+                export_otio_button.config(state=tk.NORMAL),
+            ))
 
             output = "Time Intervals (in seconds):"
             for start, end in time_intervals:
@@ -110,13 +147,63 @@ def start_tkinter_GUI():
                 "Frame Skip and Skip Tolerance must be whole numbers of 0 or higher.")
             return
 
-        # Prepare the progress bar for a new detection run
+        # Prepare the progress bar for a new detection run, and disable the
+        # export buttons since they'd otherwise still point at the previous
+        # run's results until this new one finishes.
         progress_bar['value'] = 0  # Reset value
+        export_csv_button.config(state=tk.DISABLED)
+        export_edl_button.config(state=tk.DISABLED)
+        export_otio_button.config(state=tk.DISABLED)
 
         thread = threading.Thread(
             target=_run_detection_and_report,
             args=(reference_image_path, video_path, frame_skip, frame_skip_tolerance))
         thread.start()
+
+    def export_csv():
+        if last_results["time_intervals"] is None:
+            messagebox.showwarning("No Results", "Run a detection scan first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv", filetypes=[("CSV Files", "*.csv")])
+        if not path:
+            return
+        try:
+            export_intervals_to_csv(last_results["time_intervals"], path)
+            messagebox.showinfo("Export Complete", f"Saved CSV to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
+
+    def export_edl():
+        if last_results["time_intervals"] is None:
+            messagebox.showwarning("No Results", "Run a detection scan first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".edl", filetypes=[("EDL Files", "*.edl")])
+        if not path:
+            return
+        try:
+            export_intervals_to_edl(
+                last_results["time_intervals"], path, last_results["fps"])
+            messagebox.showinfo("Export Complete", f"Saved EDL to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
+
+    def export_otio():
+        if last_results["time_intervals"] is None:
+            messagebox.showwarning("No Results", "Run a detection scan first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".otio", filetypes=[("OpenTimelineIO Files", "*.otio")])
+        if not path:
+            return
+        try:
+            export_intervals_to_otio(
+                last_results["time_intervals"], path, last_results["fps"],
+                last_results["video_path"])
+            messagebox.showinfo("Export Complete", f"Saved OTIO to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
 
     # Set up Tkinter GUI
     root = tk.Tk()
@@ -158,6 +245,22 @@ def start_tkinter_GUI():
     # Progress bar
     progress_bar = ttk.Progressbar(root, length=300, mode='determinate')
     progress_bar.pack(pady=10)
+
+    # Export buttons — disabled until a scan completes successfully
+    export_frame = tk.Frame(root)
+    export_frame.pack(pady=10)
+
+    export_csv_button = tk.Button(
+        export_frame, text="Export CSV", command=export_csv, state=tk.DISABLED)
+    export_csv_button.grid(row=0, column=0, padx=5)
+
+    export_edl_button = tk.Button(
+        export_frame, text="Export EDL", command=export_edl, state=tk.DISABLED)
+    export_edl_button.grid(row=0, column=1, padx=5)
+
+    export_otio_button = tk.Button(
+        export_frame, text="Export OTIO", command=export_otio, state=tk.DISABLED)
+    export_otio_button.grid(row=0, column=2, padx=5)
 
     # Loop
     root.mainloop()
