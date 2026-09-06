@@ -198,7 +198,8 @@ def detect_face_in_video(video_path, reference_embedding, frame_skip_tolerance=3
     return binary_detection_array, time_intervals
 
 
-def run_face_detection(reference_image_path, video_path, progress_callback=None):
+def run_face_detection(reference_image_path, video_path, progress_callback=None,
+                        frame_skip=3, frame_skip_tolerance=3):
     """
     Run a full detection pass: load the reference face, scan the video, and
     return the results. Raises on failure (e.g. bad reference image, missing
@@ -209,6 +210,11 @@ def run_face_detection(reference_image_path, video_path, progress_callback=None)
         reference_image_path (str): Path to the reference face image.
         video_path (str): Path to the video file to scan.
         progress_callback (callable, optional): Function for reporting progress.
+        frame_skip (int): Number of frames to skip between processed frames.
+            Higher = faster scan, lower detection resolution ("efficiency" knob).
+        frame_skip_tolerance (int): Consecutive missed detections allowed
+            before an interval is closed. Higher = more forgiving of brief
+            misses ("tolerance" knob).
 
     Returns:
         time_intervals (list): List of (start_time, end_time) tuples.
@@ -216,6 +222,8 @@ def run_face_detection(reference_image_path, video_path, progress_callback=None)
     """
     reference_embedding = load_reference_image(reference_image_path)
     binary_detection_array, time_intervals = detect_face_in_video(
-        video_path, reference_embedding, progress_callback=progress_callback)
+        video_path, reference_embedding,
+        frame_skip=frame_skip,
+        frame_skip_tolerance=frame_skip_tolerance,
+        progress_callback=progress_callback)
     return time_intervals, binary_detection_array
-
